@@ -246,8 +246,13 @@ def process_subjects(frequency, labels, window_size, preprocess_output_folder='d
             df['label'] = labels_df
             df = convert_labels(df, target_labels=labels, binary=False)
             df = data_normalizer(df)
-            os.makedirs(f'{preprocess_output_folder}/no_resampling', exist_ok=True)
-            output_file = f'{preprocess_output_folder}/no_resampling/WESAD_{subject}.csv'
+
+            if resample_needed:
+                os.makedirs(f'{preprocess_output_folder}/resampling/{frequency}', exist_ok=True)
+                output_file = f'{preprocess_output_folder}/resampling/{frequency}/WESAD_{subject}_{frequency}.csv'
+            else:
+                os.makedirs(f'{preprocess_output_folder}/no_resampling', exist_ok=True)
+                output_file = f'{preprocess_output_folder}/no_resampling/WESAD_{subject}.csv'
             df.to_csv(output_file, index=False)
 
             print(f'Output file for subject {subject}: {output_file}')
@@ -259,10 +264,17 @@ def load_all_subject_data(frequency, subjects=SUBJECTS, preprocess_output_folder
                           resample_needed=True):
     """Load all subjects"""
     all_dict = {}
-    folder = 'resampling'
-    for subject in subjects:
-        df = pd.read_csv(f'{preprocess_output_folder}/{folder}/{frequency}/WESAD_{subject}_{frequency}.csv')
-        all_dict[subject] = df
+
+    if resample_needed:
+        folder = 'resampling'
+        for subject in subjects:
+            df = pd.read_csv(f'{preprocess_output_folder}/{folder}/{frequency}/WESAD_{subject}_{frequency}.csv')
+            all_dict[subject] = df
+    else:
+        folder = 'no_resampling'
+        for subject in subjects:
+            df = pd.read_csv(f'{preprocess_output_folder}/{folder}/WESAD_{subject}.csv')
+            all_dict[subject] = df
     return all_dict
 
 

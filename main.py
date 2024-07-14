@@ -5,7 +5,6 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
-
 from preprocessing import apply_smote_to_subjects, process_subjects, load_all_subject_data
 from encoding.GAFGenerator import GAFDataset
 from encoding.MTFGenerator import MTFDataset
@@ -13,6 +12,8 @@ from encoding.RPGenerator import RPDataset
 from model.CNN import get_model
 from utils.mail import send_email
 from utils.plot import plot_accuracy, plot_loss, plot_confusion_matrix
+import numpy as np
+import matplotlib.pyplot as plt
 
 torch.backends.cudnn.benchmark = True
 
@@ -25,8 +26,14 @@ FEATURES = [
     'chest_temp', 'wrist_acc_x', 'wrist_acc_y', 'wrist_acc_z', 'wrist_bvp', 'wrist_eda', 'wrist_temp'
 ]
 
+def bootstrap_dataset(dataset, n_samples=None):
+    """Generate a bootstrap sample from the dataset."""
+    if n_samples is None:
+        n_samples = len(dataset)
+    indices = np.random.choice(range(len(dataset)), size=n_samples, replace=True)
+    return torch.utils.data.Subset(dataset, indices)
 
-def main(frequency, dataset_path, window_sec, window_stride, patience, epochs, methods, model_choice, labels):
+def main(frequency, dataset_path, window_sec, window_stride, patience, epochs, methods, model_choice, labels, bootstrap=False):
     dataset_folder = dataset_path
     resample_freq = frequency
     preprocess_output_folder = f'{dataset_folder}/Preprocessed_Subjects'
@@ -63,69 +70,83 @@ def main(frequency, dataset_path, window_sec, window_stride, patience, epochs, m
     print(f'Train subjects: {train_subjects}')
     print(f'Validation subjects: {validation_subjects}')
 
-    if 'gaf_difference' in methods:
-        train_dataset = GAFDataset(train_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
-                                   method='difference', window_size=window_size, time_step=time_step, seed=seed)
-        val_dataset = GAFDataset(validation_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
-                                 method='difference', window_size=window_size, time_step=time_step, seed=seed)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    bootstrap_results = {'accuracy': [], 'loss': []}
 
-        start_training(train_loader, val_loader, model_choice, 'GAF difference', n_classes=n_classes, channels=14,
-                       patience=patience, epochs=epochs, optimizer_choice=optimizer_choice, learning_rate=learning_rate,
-                       model_output_folder=model_output_folder, resample_freq=resample_freq, window_sec=window_sec)
+    for method in methods:
+        if method.startswith('gaf'):
+            method_name = method.split('_')[1]
+            train_dataset = GAFDataset(train_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
+                                       method=method_name, window_size=window_size, time_step=time_step, seed=seed)
+            val_dataset = GAFDataset(validation_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
+                                     method=method_name, window_size=window_size, time_step=time_step, seed=seed)
+        elif method == 'mtf':
+            train_dataset = MTFDataset(train_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
+                                       window_size=window_size, time_step=time_step, n_bins=n_bins, seed=seed)
+            val_dataset = MTFDataset(validation_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
+                                     window_size=window_size, time_step=time_step, n_bins=n_bins, seed=seed)
+        elif method.startswith('rp'):
+            distance = method.split('_')[1]
+            train_dataset = RPDataset(train_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
+                                      threshold=threshold, window_size=window_size, time_step=time_step, shuffle=True,
+                                      seed=seed, distance=distance)
+            val_dataset = RPDataset(validation_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
+                                    threshold=threshold, window_size=window_size, time_step=time_step, shuffle=True,
+                                    seed=seed, distance=distance)
+        else:
+            raise ValueError(f"Unknown method: {method}")
 
-    if 'gaf_summation' in methods:
-        train_dataset = GAFDataset(train_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
-                                   method='summation', window_size=window_size, time_step=time_step, seed=seed)
-        val_dataset = GAFDataset(validation_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
-                                 method='summation', window_size=window_size, time_step=time_step, seed=seed)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+        if bootstrap:
+            bootstrap_accuracies = []
+            bootstrap_losses = []
+            n_bootstrap_samples = 100  # Number of bootstrap samples
 
-        start_training(train_loader, val_loader, model_choice, 'GAF summation', n_classes=n_classes, channels=14,
-                       patience=patience, epochs=epochs, optimizer_choice=optimizer_choice, learning_rate=learning_rate,
-                       model_output_folder=model_output_folder, resample_freq=resample_freq, window_sec=window_sec)
+            for i in range(n_bootstrap_samples):
+                bootstrapped_train_dataset = bootstrap_dataset(train_dataset)
+                train_loader = DataLoader(bootstrapped_train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+                val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    if 'mtf' in methods:
-        train_dataset = MTFDataset(train_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
-                                   window_size=window_size, time_step=time_step, n_bins=n_bins, seed=seed)
-        val_dataset = MTFDataset(validation_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
-                                 window_size=window_size, time_step=time_step, n_bins=n_bins, seed=seed)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+                history = start_training(train_loader, val_loader, model_choice, method.replace('_', ' '), n_classes=n_classes,
+                                         channels=14 if 'gaf' in method or method == 'mtf' else 1, patience=patience, epochs=epochs,
+                                         optimizer_choice=optimizer_choice, learning_rate=learning_rate,
+                                         model_output_folder=model_output_folder, resample_freq=resample_freq, window_sec=window_sec)
 
-        start_training(train_loader, val_loader, model_choice, 'MTF', n_classes=n_classes, channels=14,
-                       patience=patience, epochs=epochs, optimizer_choice=optimizer_choice, learning_rate=learning_rate,
-                       model_output_folder=model_output_folder, resample_freq=resample_freq, window_sec=window_sec)
+                bootstrap_accuracies.append(history['val_acc'][-1])
+                bootstrap_losses.append(history['val_loss'][-1])
 
-    if 'rp_euclidean' in methods:
-        train_dataset = RPDataset(train_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
-                                  threshold=threshold, window_size=window_size, time_step=time_step, shuffle=True,
-                                  seed=seed, distance='euclidean')
-        val_dataset = RPDataset(validation_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
-                                threshold=threshold, window_size=window_size, time_step=time_step, shuffle=True,
-                                seed=seed, distance='euclidean')
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+            bootstrap_results['accuracy'].append(bootstrap_accuracies)
+            bootstrap_results['loss'].append(bootstrap_losses)
 
-        start_training(train_loader, val_loader, model_choice, 'RP euclidean', n_classes=n_classes, channels=1,
-                       patience=patience, epochs=epochs, optimizer_choice=optimizer_choice, learning_rate=learning_rate,
-                       model_output_folder=model_output_folder, resample_freq=resample_freq, window_sec=window_sec)
+            plot_bootstrap_distributions(bootstrap_accuracies, bootstrap_losses, method, model_output_folder)
 
-    if 'rp_dtw' in methods:
-        train_dataset = RPDataset(train_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
-                                  threshold=threshold, window_size=window_size, time_step=time_step, shuffle=True,
-                                  seed=seed, distance='dtw')
-        val_dataset = RPDataset(validation_subjects, all_subject_data, FEATURES, labels, image_size=image_size,
-                                threshold=threshold, window_size=window_size, time_step=time_step, shuffle=True,
-                                seed=seed, distance='dtw')
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+        else:
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-        start_training(train_loader, val_loader, model_choice, 'RP dtw', n_classes=n_classes, channels=1,
-                       patience=patience, epochs=epochs, optimizer_choice=optimizer_choice, learning_rate=learning_rate,
-                       model_output_folder=model_output_folder, resample_freq=resample_freq, window_sec=window_sec)
+            start_training(train_loader, val_loader, model_choice, method.replace('_', ' '), n_classes=n_classes,
+                           channels=14 if 'gaf' in method or method == 'mtf' else 1, patience=patience, epochs=epochs,
+                           optimizer_choice=optimizer_choice, learning_rate=learning_rate,
+                           model_output_folder=model_output_folder, resample_freq=resample_freq, window_sec=window_sec)
+
+
+def plot_bootstrap_distributions(accuracies, losses, method, output_folder):
+    """Plot the distributions of the bootstrap accuracies and losses."""
+    plt.figure(figsize=(12, 6))
+
+    plt.subplot(1, 2, 1)
+    plt.hist(accuracies, bins=20, edgecolor='k', alpha=0.7)
+    plt.title(f'Bootstrap Accuracy Distribution for {method}')
+    plt.xlabel('Accuracy')
+    plt.ylabel('Frequency')
+
+    plt.subplot(1, 2, 2)
+    plt.hist(losses, bins=20, edgecolor='k', alpha=0.7)
+    plt.title(f'Bootstrap Loss Distribution for {method}')
+    plt.xlabel('Loss')
+    plt.ylabel('Frequency')
+
+    plt.tight_layout()
+    plt.savefig(f'{output_folder}/bootstrap_distributions_{method}.png')
+    plt.show()
 
 
 def get_device():
@@ -145,7 +166,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device):
         inputs, labels = inputs.to(device), labels.to(device).float()
 
         optimizer.zero_grad()
-        outputs = model(inputs).squeeze(1)  # logits
+        outputs = model(inputs).squeeze(1)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
@@ -282,14 +303,15 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--methods', type=str, nargs='+',
                         default=['gaf_difference', 'gaf_summation', 'mtf', 'rp_euclidean', 'rp_dtw'],
-                        help='Methods to run')
+                        help='Encoding methods to run')
     parser.add_argument('--model', type=str, choices=['custom', 'vgg', 'resnet'], default='custom',
                         help='Model choice for training')
     parser.add_argument('--labels', type=int, nargs='+', default=[1, 2], help='List of labels for classification')
+    parser.add_argument('--bootstrap', action='store_true', help='Enable bootstrap analysis')
     args = parser.parse_args()
 
     if args.freq and args.dataset and args.sec:
         main(args.freq, args.dataset, args.sec, args.window_stride, args.patience, args.epochs, args.methods,
-             args.model, args.labels)
+             args.model, args.labels, args.bootstrap)
     else:
         print('Please provide the frequency and the path to the dataset')
